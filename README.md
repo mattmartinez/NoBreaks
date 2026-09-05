@@ -10,8 +10,9 @@ On some channels Twitch serves the ad markers to those player types as well and 
 
 ## Install
 
-1. Open `chrome://extensions` and enable **Developer mode**.
-2. Click **Load unpacked** and pick this folder.
+1. Download `NoBreaks-1.0.0.zip` from the [latest release](https://github.com/mattmartinez/NoBreaks/releases/latest) and extract it (or clone this repo).
+2. Open `chrome://extensions` and enable **Developer mode**.
+3. Click **Load unpacked** and pick the extracted `NoBreaks` folder.
 
 Chrome 111 or newer. After pulling changes to `manifest.json`, click the extension's reload button on `chrome://extensions`; the scripts themselves are picked up on the next page load.
 
