@@ -1,0 +1,25 @@
+{
+    "manifest_version": 3,
+    "name": "NoBreaks",
+    "version": "1.0.0",
+    "description": "Skips Twitch ad breaks by swapping in an ad-free copy of the live stream.",
+    "minimum_chrome_version": "111",
+    "permissions": ["storage"],
+    "action": {
+        "default_title": "NoBreaks",
+        "default_popup": "popup/popup.html"
+    },
+    "content_scripts": [
+        {
+            "matches": ["https://*.twitch.tv/*"],
+            "run_at": "document_start",
+            "world": "MAIN",
+            "js": ["adblock.js"]
+        },
+        {
+            "matches": ["https://*.twitch.tv/*"],
+            "run_at": "document_start",
+            "js": ["bridge.js"]
+        }
+    ]
+}

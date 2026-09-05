@@ -1,0 +1,25 @@
+body {
+    width: 280px;
+    margin: 0;
+    padding: 12px 16px 16px;
+    font: 14px/1.5 system-ui, sans-serif;
+    color: #efeff1;
+    background: #18181b;
+}
+
+h1 {
+    margin: 0 0 8px;
+    font-size: 16px;
+}
+
+label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+}
+
+p {
+    margin: 12px 0 0;
+    color: #adadb8;
+}
