@@ -342,9 +342,11 @@ function declareOptions(scope) {
     scope.AdSignifier = 'stitched';
     scope.ClientID = 'kimne78kx3ncx6brgo4mv6wki5h1ko'; // Twitch's public web client id
     scope.DeviceID = null;
-    // Player types to request the stream as while the normal ('site') stream carries ads, tried in this order.
-    // 'thunderdome' only offers qualities up to 480p.
-    scope.FallbackPlayerTypes = ['embed', 'thunderdome'];
+    // Player types to request the stream as while the normal ('site') stream carries ads, tried in this order, best
+    // picture first. 'embed' offers the full range but is marked on channels where Twitch enforces the break;
+    // 'thunderdome' stops at 480p; 'autoplay' is asked for as an android device and tops out at 360p, but it is the
+    // only one that still comes back without the ad when every other player type is marked.
+    scope.FallbackPlayerTypes = ['embed', 'thunderdome', 'autoplay'];
     scope.WasShowingAd = false;
     scope.BreakEnforced = false; // set once a break proved to carry ads on every fallback; reset when the break ends
     scope.StreamInfos = {}; // channel name -> stream info
@@ -735,7 +737,12 @@ function parseAttributes(str) {
 }
 
 function getAccessToken(channelName, playerType, realFetch) {
-    var query = 'query PlaybackAccessToken_Template($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!) {  streamPlaybackAccessToken(channelName: $login, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isLive) {    value    signature    __typename  }  videoPlaybackAccessToken(id: $vodID, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isVod) {    value    signature    __typename  }}';
+    // Twitch decides whether to stitch an ad into a stream partly from the player type and the platform it is asked
+    // for. The 'autoplay' player asked for as an android device is the one combination still served without the ad on
+    // channels where every web player type is marked; asked for as web, or as ios, it carries the ad like the rest.
+    // Platform has to be a query variable for that: the query the site itself sends hardcodes "web".
+    var platform = playerType === 'autoplay' ? 'android' : 'web';
+    var query = 'query PlaybackAccessToken_Template($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!, $platform: String!) {  streamPlaybackAccessToken(channelName: $login, params: {platform: $platform, playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isLive) {    value    signature    __typename  }  videoPlaybackAccessToken(id: $vodID, params: {platform: $platform, playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isVod) {    value    signature    __typename  }}';
     return gqlRequest({
         operationName: 'PlaybackAccessToken_Template',
         query: query,
@@ -744,7 +751,8 @@ function getAccessToken(channelName, playerType, realFetch) {
             login: channelName,
             isVod: false,
             vodID: '',
-            playerType: playerType
+            playerType: playerType,
+            platform: platform
         }
     }, realFetch);
 }
