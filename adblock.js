@@ -602,7 +602,7 @@ async function getStickyM3U8(streamInfo, variant, realFetch) {
     if (!cache || !cache.Value) {
         return null;
     }
-    var streamM3u8Url = getStreamUrlForVariant(cache.Value, variant);
+    var streamM3u8Url = getStreamUrlForVariant(cache.Value, variant, streamInfo.Sticky === 'autoplay');
     if (!streamM3u8Url) {
         return null;
     }
@@ -668,7 +668,7 @@ async function getStreamForVariant(streamInfo, variant, encodingsM3u8, playerTyp
     var cache = streamInfo.FallbackCache[playerType];
     cache.RequestTime = Date.now();
     cache.Value = encodingsM3u8;
-    var streamM3u8Url = getStreamUrlForVariant(encodingsM3u8, variant);
+    var streamM3u8Url = getStreamUrlForVariant(encodingsM3u8, variant, playerType === 'autoplay');
     if (!streamM3u8Url) {
         cache.Value = null;
         return null;
@@ -682,9 +682,13 @@ async function getStreamForVariant(streamInfo, variant, encodingsM3u8, playerTyp
     return m3u8Text || null;
 }
 
-function getStreamUrlForVariant(encodingsM3u8, variant) {
+function getStreamUrlForVariant(encodingsM3u8, variant, mustMatchResolution) {
     // Picks the variant matching the one the player is playing: same resolution (and ideally frame rate), else the
     // first (highest quality) video variant. Audio-only playback only ever gets the audio-only variant.
+    //
+    // mustMatchResolution refuses to substitute a different resolution at all. The android stream stops at 640x360,
+    // and handing 360p segments to a player whose master promised 1080p makes it give up with "this video is either
+    // unavailable or not supported" (error 4000). Serving nothing is better than breaking playback.
     var lines = encodingsM3u8.split(/\r?\n/);
     var firstUrl = null;
     var matchedUrl = null;
@@ -720,7 +724,10 @@ function getStreamUrlForVariant(encodingsM3u8, variant) {
             matchedUrl = uri;
         }
     }
-    return wantsVideo ? (matchedUrl || firstUrl) : null;
+    if (!wantsVideo) {
+        return null;
+    }
+    return mustMatchResolution ? matchedUrl : (matchedUrl || firstUrl);
 }
 
 function parseAttributes(str) {
