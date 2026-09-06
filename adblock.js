@@ -138,17 +138,51 @@ function hideBanner() {
     }
 }
 
+var lastResync = 0;
+var resyncTimer = null;
+var resyncTries = 0;
+
 function resyncPlayer() {
-    // The stream the player was buffering and the one it is handed back to do not share a timeline. Pausing and
-    // resuming through Twitch's own player instance makes it drop what it was waiting for and rejoin the live edge.
+    // Recover the player after a real skip: pausing and resuming Twitch's own player instance makes it drop the
+    // alternate session's timeline and rejoin the live edge.
+    //
+    // Never do this while Twitch is showing its own ad. A client-side ad (the "ad break" overlay with a countdown)
+    // holds the player, and pausing it there also pauses the ad itself, so its countdown never finishes and the stream
+    // locks up for good. While that overlay is up we wait and check again; once it clears we resync, so a genuine
+    // hand-back still recovers even if the overlay lingers a moment past the playlist going clean (and we rejoin the
+    // live edge after a break we could not skip). Several player workers can ask at once, so only one wait runs at a
+    // time and nudges are debounced.
+    if (resyncTimer !== null) {
+        return;
+    }
+    if (isTwitchAdShowing()) {
+        if (resyncTries++ > 90) {
+            resyncTries = 0;
+            return;
+        }
+        resyncTimer = setTimeout(function() {
+            resyncTimer = null;
+            resyncPlayer();
+        }, 2000);
+        return;
+    }
+    resyncTries = 0;
+    if (Date.now() - lastResync < 2000) {
+        return;
+    }
     var player = findMediaPlayer();
     if (!player) {
         return;
     }
+    lastResync = Date.now();
     try {
         player.pause();
         player.play();
     } catch (err) {}
+}
+
+function isTwitchAdShowing() {
+    return !!document.querySelector('[data-a-target="video-ad-countdown"], [data-a-target="video-ad-label"]');
 }
 
 function findMediaPlayer() {
@@ -349,7 +383,6 @@ async function processM3U8(url, textStr, realFetch) {
         console.log('NoBreaks: no ad-free stream available, leaving this break alone');
         WasShowingAd = false;
         postMessage({ key: 'HideAdBlockBanner' });
-        postMessage({ key: 'ResyncPlayer' });
     }
     return textStr;
 }
