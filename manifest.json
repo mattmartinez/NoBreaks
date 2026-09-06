@@ -4,22 +4,35 @@
     "version": "1.2.0",
     "description": "Skips Twitch ad breaks by swapping in an ad-free copy of the live stream.",
     "minimum_chrome_version": "111",
-    "permissions": ["storage"],
+    "permissions": [
+        "storage"
+    ],
     "action": {
         "default_title": "NoBreaks",
         "default_popup": "popup/popup.html"
     },
     "content_scripts": [
         {
-            "matches": ["https://*.twitch.tv/*"],
+            "matches": [
+                "https://*.twitch.tv/*"
+            ],
             "run_at": "document_start",
             "world": "MAIN",
-            "js": ["adblock.js"]
+            "js": [
+                "adblock.js"
+            ]
         },
         {
-            "matches": ["https://*.twitch.tv/*"],
+            "matches": [
+                "https://*.twitch.tv/*"
+            ],
             "run_at": "document_start",
-            "js": ["bridge.js"]
+            "js": [
+                "bridge.js"
+            ]
         }
-    ]
+    ],
+    "background": {
+        "service_worker": "background.js"
+    }
 }

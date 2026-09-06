@@ -15,6 +15,16 @@ function pushSettings() {
     });
 }
 
+// Development convenience: let a Twitch tab ask the extension to reload itself, so an edit can be picked up without
+// clicking reload on chrome://extensions. See background.js.
+window.addEventListener('message', function(event) {
+    if (event.source === window && event.data && event.data.type === 'NoBreaksReload') {
+        try {
+            chrome.runtime.sendMessage('nobreaks-reload');
+        } catch (err) {}
+    }
+});
+
 // adblock.js reports the running total of blocked seconds whenever an ad ends.
 window.addEventListener('message', function(event) {
     if (event.source === window && event.data && event.data.type === 'NoBreaksAdTime') {

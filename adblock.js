@@ -54,6 +54,8 @@ window.Worker = class Worker extends NativeWorker {
             ${hookWorkerFetch.toString()}
             ${rememberStream.toString()}
             ${processM3U8.toString()}
+            ${debugLog.toString()}
+            ${summarisePlaylist.toString()}
             ${setBanner.toString()}
             ${getStickyM3U8.toString()}
             ${getAdFreeM3U8.toString()}
@@ -65,6 +67,7 @@ window.Worker = class Worker extends NativeWorker {
             ${gqlRequest.toString()}
             declareOptions(self);
             DeviceID = ${JSON.stringify(getDeviceId())};
+            DebugEnabled = ${JSON.stringify(getDebugEnabled())};
             hookWorkerFetch();
             ${originalScript}
         `;
@@ -100,8 +103,100 @@ function getDeviceId() {
     return null;
 }
 
+function getDebugEnabled() {
+    // Set localStorage.nobreaks_debug = '1' on a Twitch tab and reload to turn introspection on.
+    try {
+        return localStorage.getItem('nobreaks_debug') === '1';
+    } catch (err) {}
+    return false;
+}
+
+// Everything the extension knows, for a human or a script to read: what the worker decided and what the player did.
+var NoBreaksDebug = window.NoBreaksDebug = {
+    enabled: getDebugEnabled(),
+    decisions: [],   // one per worker decision
+    player: [],      // one per second of player state
+    limit: 4000,
+    clear: function() { this.decisions.length = 0; this.player.length = 0; return 'cleared'; },
+    // Compact view: the decisions, newest last, as readable lines.
+    tail: function(n) {
+        return this.decisions.slice(-(n || 40)).map(function(d) {
+            var when = new Date(d.t).toTimeString().slice(0, 8);
+            var rest = [];
+            for (var k in d) {
+                if (k !== 't' && k !== 'n' && k !== 'event') { rest.push(k + '=' + JSON.stringify(d[k])); }
+            }
+            return when + '  ' + d.event + '  ' + rest.join(' ');
+        });
+    },
+    // Player state around a moment, to line up with a decision.
+    playerTail: function(n) {
+        return this.player.slice(-(n || 30)).map(function(p) {
+            return p.at + ' t=' + p.t + (p.paused ? ' PAUSED' : '') + ' rs' + p.rs + ' buf' + p.buf +
+                (p.banner ? ' BANNER' : '') + (p.ad ? ' ADUI' : '') + (p.purple ? ' PURPLE' : '');
+        });
+    },
+    summary: function() {
+        var byEvent = {};
+        this.decisions.forEach(function(d) { byEvent[d.event] = (byEvent[d.event] || 0) + 1; });
+        var frozen = this.player.filter(function(p) { return p.frozen; }).length;
+        return {
+            enabled: this.enabled, decisions: this.decisions.length, byEvent: byEvent,
+            playerSamples: this.player.length, frozenSeconds: frozen,
+            pausedSeconds: this.player.filter(function(p) { return p.paused; }).length
+        };
+    }
+};
+
+function recordDecision(entry) {
+    var log = NoBreaksDebug.decisions;
+    log.push(entry);
+    if (log.length > NoBreaksDebug.limit) {
+        log.shift();
+    }
+}
+
+function startPlayerSampler() {
+    if (!NoBreaksDebug.enabled || NoBreaksDebug.sampler) {
+        return;
+    }
+    var lastTime = null;
+    NoBreaksDebug.sampler = setInterval(function() {
+        var video = document.querySelector('.video-player video');
+        var banner = document.querySelector('.nobreaks-overlay');
+        var time = video ? Math.round(video.currentTime * 10) / 10 : null;
+        var sample = {
+            at: new Date().toTimeString().slice(0, 8),
+            t: time,
+            paused: video ? video.paused : null,
+            rs: video ? video.readyState : null,
+            net: video ? video.networkState : null,
+            buf: (video && video.buffered.length) ? Math.round((video.buffered.end(video.buffered.length - 1) - video.currentTime) * 10) / 10 : null,
+            banner: !!(banner && banner.style.display !== 'none'),
+            ad: document.querySelectorAll('[data-a-target="video-ad-countdown"],[data-a-target="video-ad-label"]').length > 0,
+            purple: (document.body.innerText || '').indexOf('Commercial break in progress') !== -1,
+            frozen: video ? (time === lastTime && !video.paused) : false
+        };
+        lastTime = time;
+        var log = NoBreaksDebug.player;
+        log.push(sample);
+        if (log.length > NoBreaksDebug.limit) {
+            log.shift();
+        }
+    }, 1000);
+}
+
+if (NoBreaksDebug.enabled) {
+    startPlayerSampler();
+    console.log('NoBreaks: introspection on. window.NoBreaksDebug.tail() / .playerTail() / .summary()');
+}
+
 function onWorkerMessage(e) {
     var key = e.data && e.data.key;
+    if (key === 'NoBreaksDebug') {
+        recordDecision(e.data.entry);
+        return;
+    }
     if (key === 'ShowAdBlockBanner') {
         showBanner();
     } else if (key === 'HideAdBlockBanner') {
@@ -256,6 +351,51 @@ function declareOptions(scope) {
     scope.StreamInfosByUrl = {}; // media playlist url (without query) -> stream info
     scope.EncodingCacheTimeout = 60000; // how long a fallback master playlist (and its token) is reused
     scope.AdRetryDelay = 5000; // how long a fallback that just served ads itself is left alone
+    scope.DebugEnabled = false;
+    scope.DebugSeq = 0;
+}
+
+function debugLog(event, data) {
+    if (!DebugEnabled) {
+        return;
+    }
+    var entry = { n: ++DebugSeq, t: Date.now(), event: event };
+    for (var k in data) {
+        entry[k] = data[k];
+    }
+    postMessage({ key: 'NoBreaksDebug', entry: entry });
+}
+
+function summarisePlaylist(text) {
+    // What a playlist actually contains, without shipping the whole thing to the page every couple of seconds.
+    if (!text) {
+        return null;
+    }
+    var lines = text.split(/\r?\n/);
+    var live = 0, ad = 0, titles = {};
+    for (var i = 0; i < lines.length; i++) {
+        if (lines[i].indexOf('#EXTINF') !== 0) {
+            continue;
+        }
+        var title = lines[i].slice(lines[i].indexOf(',') + 1).trim();
+        if (title === 'live') {
+            live++;
+        } else {
+            ad++;
+            titles[title] = (titles[title] || 0) + 1;
+        }
+    }
+    var seq = text.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/);
+    return {
+        bytes: text.length,
+        adTag: text.indexOf(AdSignifier) !== -1,
+        live: live,
+        adSegs: ad,
+        adTitles: Object.keys(titles).slice(0, 3),
+        prefetch: (text.match(/#EXT-X-TWITCH-PREFETCH:/g) || []).length,
+        discontinuities: (text.match(/#EXT-X-DISCONTINUITY\b/g) || []).length,
+        seq: seq ? Number(seq[1]) : null
+    };
 }
 
 function isMediaPlaylistUrl(url) {
@@ -319,6 +459,7 @@ function rememberStream(url, encodingsM3u8) {
         return;
     }
     var channelName = match[1];
+    debugLog('master', { channel: channelName });
     var streamInfo = StreamInfos[channelName];
     if (!streamInfo) {
         streamInfo = StreamInfos[channelName] = {
@@ -368,6 +509,14 @@ async function processM3U8(url, textStr, realFetch) {
     }
     var variant = streamInfo.Variants[key];
     var siteHasAd = textStr.includes(AdSignifier);
+    debugLog('poll', {
+        variant: variant && variant.Resolution ? variant.Resolution : 'audio',
+        site: summarisePlaylist(textStr),
+        sticky: streamInfo.Sticky,
+        cleanPolls: streamInfo.CleanPolls,
+        enforced: BreakEnforced,
+        showing: WasShowingAd
+    });
 
     if (streamInfo.Sticky) {
         streamInfo.CleanPolls = siteHasAd ? 0 : streamInfo.CleanPolls + 1;
@@ -377,12 +526,15 @@ async function processM3U8(url, textStr, realFetch) {
                 stickyText = await getStickyM3U8(streamInfo, variant, realFetch);
             } catch (err) {}
             if (stickyText) {
+                debugLog('serve-sticky', { playerType: streamInfo.Sticky, served: summarisePlaylist(stickyText) });
                 setBanner(!stickyText.includes(AdSignifier));
                 return stickyText;
             }
+            debugLog('sticky-session-gone', { playerType: streamInfo.Sticky });
             // That session is gone. Leave the rest of this break alone rather than move the player a third time.
             BreakEnforced = true;
         }
+        debugLog('hand-back', { from: streamInfo.Sticky, siteHasAd: siteHasAd });
         console.log('NoBreaks: back to the normal stream');
         streamInfo.Sticky = null;
         streamInfo.CleanPolls = 0;
@@ -409,6 +561,11 @@ async function processM3U8(url, textStr, realFetch) {
             } catch (err) {
                 console.log('NoBreaks: failed to get an ad-free stream as ' + playerType, err);
             }
+            debugLog('tried-fallback', {
+                playerType: playerType,
+                got: adFreeText ? summarisePlaylist(adFreeText) : null,
+                clean: !!(adFreeText && !adFreeText.includes(AdSignifier))
+            });
             if (adFreeText && !adFreeText.includes(AdSignifier)) {
                 streamInfo.Sticky = playerType;
                 streamInfo.CleanPolls = 0;
@@ -419,6 +576,7 @@ async function processM3U8(url, textStr, realFetch) {
         // Every fallback carries ads as well: Twitch enforces ads on this channel. A fresh session sometimes looks
         // clean for a few seconds before it is marked too; chasing that is not worth the churn, so leave the rest of
         // this break alone. The player was never moved, so there is nothing to recover.
+        debugLog('enforced', { tried: FallbackPlayerTypes });
         console.log('NoBreaks: no ad-free stream available, leaving this break alone');
         BreakEnforced = true;
     }
