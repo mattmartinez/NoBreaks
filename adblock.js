@@ -339,14 +339,20 @@ function rememberStream(url, encodingsM3u8) {
         return;
     }
     var channelName = match[1];
-    var streamInfo = StreamInfos[channelName] || (StreamInfos[channelName] = {});
+    var streamInfo = StreamInfos[channelName];
+    if (!streamInfo) {
+        streamInfo = StreamInfos[channelName] = {
+            FallbackCache: {}, // player type -> cached master playlist of that player type
+            Sticky: null, // player type whose session the player is on for the current break, if it was moved
+            CleanPolls: 0 // consecutive polls in which the normal stream was clean while the player was moved
+        };
+    }
+    // Only the variant list is rebuilt. The player re-reads the master playlist mid-break when the quality changes,
+    // and throwing the break state away there used to strand the player on the alternate session with the banner up.
     streamInfo.ChannelName = channelName;
     streamInfo.UsherUrl = withoutQuery(url);
     streamInfo.UsherParams = new URL(url).search;
     streamInfo.Variants = {}; // media playlist url (without query) -> { Resolution, FrameRate, Video }
-    streamInfo.FallbackCache = {}; // player type -> cached master playlist of that player type
-    streamInfo.Sticky = null; // player type whose session the player is on for the current break, if it was moved
-    streamInfo.CleanPolls = 0; // consecutive polls in which the normal stream was clean while the player was moved
     var lines = encodingsM3u8.split(/\r?\n/);
     for (var i = 0; i < lines.length - 1; i++) {
         if (!lines[i].startsWith('#EXT-X-STREAM-INF')) {
@@ -409,6 +415,8 @@ async function processM3U8(url, textStr, realFetch) {
     }
 
     if (!siteHasAd) {
+        // Nothing to skip and the player is on its own stream, so the banner must be down whatever happened before.
+        setBanner(false);
         BreakEnforced = false;
         return textStr;
     }
