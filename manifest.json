@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "NoBreaks",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "Skips Twitch ad breaks by swapping in an ad-free copy of the live stream.",
     "minimum_chrome_version": "111",
     "permissions": ["storage"],

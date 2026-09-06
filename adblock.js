@@ -7,6 +7,10 @@
 // limited to 480p) and hands the player that ad-free playlist instead. On channels where those variants carry ads
 // too (Twitch's "Commercial break in progress" screen) the stream is left alone.
 //
+// The normal stream and the alternate one do not share a timeline. When the break ends and the player is handed
+// back, it is paused and resumed through Twitch's own player instance so it rejoins the live edge instead of
+// waiting for segments that never arrive.
+//
 // Everything below the "Worker side" marker is copied into the worker as source text, so those functions may only
 // reference each other and the globals created by declareOptions().
 
@@ -98,6 +102,8 @@ function onWorkerMessage(e) {
         showBanner();
     } else if (key === 'HideAdBlockBanner') {
         hideBanner();
+    } else if (key === 'ResyncPlayer') {
+        resyncPlayer();
     }
 }
 
@@ -130,6 +136,44 @@ function hideBanner() {
             adTime: NoBreaksSettings.AdTime
         }, window.location.origin);
     }
+}
+
+function resyncPlayer() {
+    // The stream the player was buffering and the one it is handed back to do not share a timeline. Pausing and
+    // resuming through Twitch's own player instance makes it drop what it was waiting for and rejoin the live edge.
+    var player = findMediaPlayer();
+    if (!player) {
+        return;
+    }
+    try {
+        player.pause();
+        player.play();
+    } catch (err) {}
+}
+
+function findMediaPlayer() {
+    // Twitch keeps its player instance in the props of a React component; walk the fiber tree from the root to it.
+    var root = document.querySelector('#root');
+    if (!root) {
+        return null;
+    }
+    var rootKey = Object.keys(root).find(function(k) { return k.startsWith('__reactContainer$'); });
+    var stack = rootKey && root[rootKey] ? [root[rootKey]] : [];
+    var visited = 0;
+    while (stack.length && visited++ < 200000) {
+        var node = stack.pop();
+        var props = node.memoizedProps;
+        if (props && props.mediaPlayerInstance) {
+            return props.mediaPlayerInstance;
+        }
+        if (node.child) {
+            stack.push(node.child);
+        }
+        if (node.sibling) {
+            stack.push(node.sibling);
+        }
+    }
+    return null;
 }
 
 function getAdBlockDiv() {
@@ -169,6 +213,7 @@ function declareOptions(scope) {
     // 'thunderdome' only offers qualities up to 480p.
     scope.FallbackPlayerTypes = ['embed', 'thunderdome'];
     scope.WasShowingAd = false;
+    scope.BreakEnforced = false; // set once a break proved to carry ads on every fallback; reset when the break ends
     scope.StreamInfos = {}; // channel name -> stream info
     scope.StreamInfosByUrl = {}; // media playlist url (without query) -> stream info
     scope.EncodingCacheTimeout = 60000; // how long a fallback master playlist (and its token) is reused
@@ -262,8 +307,10 @@ function rememberStream(url, encodingsM3u8) {
 }
 
 async function processM3U8(url, textStr, realFetch) {
-    // Returns an ad-free playlist for a media playlist that contains ads, or the playlist unchanged.
-    var streamInfo = StreamInfosByUrl[withoutQuery(url)];
+    // Returns the playlist the player should get for the media playlist it asked for: an ad-free one from another
+    // session while the normal stream carries ads, otherwise its own.
+    var key = withoutQuery(url);
+    var streamInfo = StreamInfosByUrl[key];
     if (!textStr || !streamInfo) {
         return textStr;
     }
@@ -272,29 +319,37 @@ async function processM3U8(url, textStr, realFetch) {
             console.log('NoBreaks: ads finished');
             WasShowingAd = false;
             postMessage({ key: 'HideAdBlockBanner' });
+            postMessage({ key: 'ResyncPlayer' });
         }
+        BreakEnforced = false;
         return textStr;
     }
-    var variant = streamInfo.Variants[withoutQuery(url)];
-    for (var i = 0; i < FallbackPlayerTypes.length; i++) {
-        var playerType = FallbackPlayerTypes[i];
-        var adFreeText = null;
-        try {
-            adFreeText = await getAdFreeM3U8(streamInfo, variant, playerType, realFetch);
-        } catch (err) {
-            console.log('NoBreaks: failed to get an ad-free stream as ' + playerType, err);
+    if (!BreakEnforced) {
+        var variant = streamInfo.Variants[key];
+        for (var i = 0; i < FallbackPlayerTypes.length; i++) {
+            var playerType = FallbackPlayerTypes[i];
+            var adFreeText = null;
+            try {
+                adFreeText = await getAdFreeM3U8(streamInfo, variant, playerType, realFetch);
+            } catch (err) {
+                console.log('NoBreaks: failed to get an ad-free stream as ' + playerType, err);
+            }
+            if (adFreeText && !adFreeText.includes(AdSignifier)) {
+                WasShowingAd = true;
+                postMessage({ key: 'ShowAdBlockBanner' });
+                return adFreeText;
+            }
         }
-        if (adFreeText && !adFreeText.includes(AdSignifier)) {
-            WasShowingAd = true;
-            postMessage({ key: 'ShowAdBlockBanner' });
-            return adFreeText;
-        }
+        // Every fallback carries ads as well: Twitch enforces ads on this channel. A fresh session sometimes looks
+        // clean for a few seconds before it is marked too; chasing that is not worth the churn, so leave the rest of
+        // this break alone.
+        BreakEnforced = true;
     }
-    // Every variant carries ads as well; let the player show the normal stream and say so.
     if (WasShowingAd) {
-        console.log('NoBreaks: no ad-free stream available');
+        console.log('NoBreaks: no ad-free stream available, leaving this break alone');
         WasShowingAd = false;
         postMessage({ key: 'HideAdBlockBanner' });
+        postMessage({ key: 'ResyncPlayer' });
     }
     return textStr;
 }
@@ -306,37 +361,45 @@ async function getAdFreeM3U8(streamInfo, variant, playerType, realFetch) {
     if (cache.RetryAfter > Date.now()) {
         return null;
     }
+    var text = null;
     if (cache.Value && cache.RequestTime >= Date.now() - EncodingCacheTimeout) {
         try {
-            var cachedResult = await getStreamForVariant(streamInfo, variant, cache.Value, playerType, realFetch);
-            if (cachedResult) {
-                return cachedResult;
-            }
+            text = await getStreamForVariant(streamInfo, variant, cache.Value, playerType, realFetch);
         } catch (err) {
             cache.Value = null;
         }
     }
-    var accessTokenResponse = await getAccessToken(streamInfo.ChannelName, playerType, realFetch);
-    if (accessTokenResponse.status !== 200) {
-        return null;
+    if (!text) {
+        var accessTokenResponse = await getAccessToken(streamInfo.ChannelName, playerType, realFetch);
+        if (accessTokenResponse.status !== 200) {
+            return null;
+        }
+        var accessToken = await accessTokenResponse.json();
+        var token = accessToken && accessToken.data ? accessToken.data.streamPlaybackAccessToken : null;
+        if (!token || !token.value || !token.signature) {
+            return null;
+        }
+        var urlInfo = new URL(streamInfo.UsherUrl + streamInfo.UsherParams);
+        urlInfo.searchParams.set('sig', token.signature);
+        urlInfo.searchParams.set('token', token.value);
+        var encodingsM3u8Response = await realFetch(urlInfo.href);
+        if (encodingsM3u8Response.status !== 200) {
+            return null;
+        }
+        console.log('NoBreaks: trying to skip ads as ' + playerType);
+        text = await getStreamForVariant(streamInfo, variant, await encodingsM3u8Response.text(), playerType, realFetch);
     }
-    var accessToken = await accessTokenResponse.json();
-    var token = accessToken && accessToken.data ? accessToken.data.streamPlaybackAccessToken : null;
-    if (!token || !token.value || !token.signature) {
-        return null;
+    if (text && text.includes(AdSignifier)) {
+        // This session carries ads; forget it and do not retry this player type for a moment.
+        cache.Value = null;
+        cache.RetryAfter = Date.now() + AdRetryDelay;
     }
-    var urlInfo = new URL(streamInfo.UsherUrl + streamInfo.UsherParams);
-    urlInfo.searchParams.set('sig', token.signature);
-    urlInfo.searchParams.set('token', token.value);
-    var encodingsM3u8Response = await realFetch(urlInfo.href);
-    if (encodingsM3u8Response.status !== 200) {
-        return null;
-    }
-    console.log('NoBreaks: blocking ads as ' + playerType);
-    return getStreamForVariant(streamInfo, variant, await encodingsM3u8Response.text(), playerType, realFetch);
+    return text;
 }
 
 async function getStreamForVariant(streamInfo, variant, encodingsM3u8, playerType, realFetch) {
+    // Fetches the media playlist of the given fallback session that matches the variant the player is playing.
+    // Returns null when the session offers no suitable variant or the request fails.
     var cache = streamInfo.FallbackCache[playerType];
     cache.RequestTime = Date.now();
     cache.Value = encodingsM3u8;
@@ -351,11 +414,7 @@ async function getStreamForVariant(streamInfo, variant, encodingsM3u8, playerTyp
         return null;
     }
     var m3u8Text = await streamM3u8Response.text();
-    if (!m3u8Text || m3u8Text.includes(AdSignifier)) {
-        cache.Value = null;
-        cache.RetryAfter = Date.now() + AdRetryDelay;
-    }
-    return m3u8Text;
+    return m3u8Text || null;
 }
 
 function getStreamUrlForVariant(encodingsM3u8, variant) {
