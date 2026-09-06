@@ -1,6 +1,17 @@
 # Playlist proxy
 
-Twitch decides whether to put ads in a stream partly from where the request comes from, and it serves none in some regions. On channels where every player type carries the ad, asking from one of those regions is the only way to get a clean playlist. `server.js` does that: it fetches a channel's master playlist and returns it.
+> **Measured 2026-09-06: this did not work, for any region tested.** Across 12 live ad breaks on two channels,
+> requesting the playlist from genuine residential addresses in Russia (MegaFon), Poland (Vectra) and Kazakhstan
+> returned the ad every single time, as did a datacenter address in Warsaw. There was not one break where any region
+> was clean while the US was not. One of the channels tested was a Russian-language streamer, which is the most
+> favourable case there is for the idea. Twitch appears to stitch ads in globally now.
+>
+> The guides recommending Poland, Russia or Kazakhstan look out of date. Before renting anything, run
+> `check-region.js` on the candidate host and believe the result rather than the guides. The rest of this document is
+> kept because the mechanism still works if you find a region that is genuinely clean, but as of this date I could not
+> find one.
+
+The idea was that Twitch decides whether to put ads in a stream partly from where the request comes from, and served none in some regions. On channels where every player type carries the ad, asking from such a region would be the only way to get a clean playlist. `server.js` does that: it fetches a channel's master playlist and returns it.
 
 Only playlists go through here, a few kilobytes every couple of seconds. The video is fetched by the browser straight from Twitch's CDN, so this needs almost no bandwidth or CPU and adds no buffering.
 

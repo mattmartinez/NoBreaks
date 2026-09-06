@@ -10,7 +10,7 @@ On some channels Twitch serves the ad markers to every player type and shows "Co
 
 ## Enforced breaks and the optional proxy
 
-Twitch decides whether to put ads in a stream partly from where the request comes from, and it serves none in some regions. When every player type carries the ad, the only way to get a clean playlist is to ask for it from one of those regions. NoBreaks can do that through a proxy you run.
+Twitch used to serve no ads in some regions, so asking for the playlist from one of them was a way out when every player type carried the ad. NoBreaks can still do that through a proxy you run, but measurements on 2026-09-06 found no region where it helped: residential addresses in Russia, Poland and Kazakhstan all received the same ads across 12 live breaks. Test with `proxy/check-region.js` before spending money on this. See [proxy/README.md](proxy/README.md).
 
 It is off by default and never contacted unless a break turns out to be enforced. Only the playlist is proxied, a few kilobytes every couple of seconds; the video itself still streams straight from Twitch, so the proxy needs almost no bandwidth and adds no buffering.
 
