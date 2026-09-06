@@ -9,6 +9,11 @@
     <h1>NoBreaks</h1>
     <label><input type="checkbox" id="banner" checked> Show "Skipping ad break..." over the player</label>
     <p>Ads blocked for <span id="ad-time">0s</span> in total.</p>
+    <label class="field" for="proxy">Playlist proxy (optional)</label>
+    <input type="text" id="proxy" placeholder="https://host/playlist/{channel}.m3u8" spellcheck="false" autocomplete="off">
+    <p class="hint">Only used when Twitch puts the ad in every copy of the stream. Must be an https url containing
+    <code>{channel}</code>. Reload the Twitch tab after changing this.</p>
+    <p class="hint" id="proxy-state"></p>
     <script src="popup.js"></script>
 </body>
 </html>
