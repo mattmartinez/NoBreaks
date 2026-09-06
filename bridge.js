@@ -4,17 +4,7 @@
 // to adblock.js, which runs in the page itself.
 
 function pushSettings() {
-    chrome.storage.local.get(['bannerVisible', 'adTime', 'proxyUrl'], function(result) {
-        // adblock.js reads the proxy from localStorage: it needs the value synchronously, when the player worker is
-        // created, which can be before this callback would have run.
-        try {
-            var proxy = typeof result.proxyUrl === 'string' ? result.proxyUrl.trim() : '';
-            if (proxy) {
-                localStorage.setItem('nobreaks_proxy', proxy);
-            } else {
-                localStorage.removeItem('nobreaks_proxy');
-            }
-        } catch (err) {}
+    chrome.storage.local.get(['bannerVisible', 'adTime'], function(result) {
         window.postMessage({
             type: 'NoBreaksSettings',
             settings: {

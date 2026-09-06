@@ -5,9 +5,8 @@
 // worker, so this script wraps the Worker constructor, hooks fetch inside the worker and, whenever a playlist
 // contains ads, requests the same stream as another player type ('embed' first, then 'thunderdome' which is
 // limited to 480p) and hands the player that ad-free playlist instead. On channels where those variants carry ads
-// too (Twitch's "Commercial break in progress" screen) there is no ad-free copy to swap in. If the user has set a
-// proxy url, the playlist is fetched through it instead: the proxy asks Twitch from a region that serves no ads, and
-// only the playlist goes through it, never the video. Without a proxy those breaks are left alone.
+// too (Twitch's "Commercial break in progress" screen) there is no ad-free copy to swap in and the break is left
+// alone.
 //
 // The normal stream and the alternate one do not share a timeline. When the break ends and the player is handed
 // back, it is paused and resumed through Twitch's own player instance so it rejoins the live edge instead of
@@ -59,7 +58,6 @@ window.Worker = class Worker extends NativeWorker {
             ${getStickyM3U8.toString()}
             ${getAdFreeM3U8.toString()}
             ${getTwitchEncodings.toString()}
-            ${getProxyEncodings.toString()}
             ${getStreamForVariant.toString()}
             ${getStreamUrlForVariant.toString()}
             ${parseAttributes.toString()}
@@ -67,10 +65,6 @@ window.Worker = class Worker extends NativeWorker {
             ${gqlRequest.toString()}
             declareOptions(self);
             DeviceID = ${JSON.stringify(getDeviceId())};
-            ProxyUrl = ${JSON.stringify(getProxyUrl())};
-            if (ProxyUrl) {
-                FallbackPlayerTypes = ['embed', 'proxy', 'thunderdome'];
-            }
             hookWorkerFetch();
             ${originalScript}
         `;
@@ -101,19 +95,6 @@ function getDeviceId() {
         var stored = localStorage.getItem('local_copy_unique_id');
         if (stored) {
             return stored.replace(/"/g, '');
-        }
-    } catch (err) {}
-    return null;
-}
-
-function getProxyUrl() {
-    // bridge.js mirrors the popup's proxy setting into localStorage, because the worker has to be handed the value the
-    // moment it is created and chrome.storage can only be read asynchronously. Anything that is not an https url with a
-    // {channel} placeholder is ignored.
-    try {
-        var stored = localStorage.getItem('nobreaks_proxy');
-        if (stored && stored.indexOf('https://') === 0 && stored.indexOf('{channel}') !== -1) {
-            return stored;
         }
     } catch (err) {}
     return null;
@@ -269,7 +250,6 @@ function declareOptions(scope) {
     // Player types to request the stream as while the normal ('site') stream carries ads, tried in this order.
     // 'thunderdome' only offers qualities up to 480p.
     scope.FallbackPlayerTypes = ['embed', 'thunderdome'];
-    scope.ProxyUrl = null; // optional playlist proxy, set from the popup; 'proxy' joins the list above when present
     scope.WasShowingAd = false;
     scope.BreakEnforced = false; // set once a break proved to carry ads on every fallback; reset when the break ends
     scope.StreamInfos = {}; // channel name -> stream info
@@ -489,9 +469,7 @@ async function getAdFreeM3U8(streamInfo, variant, playerType, realFetch) {
         }
     }
     if (!text) {
-        var encodingsM3u8 = playerType === 'proxy'
-            ? await getProxyEncodings(streamInfo, realFetch)
-            : await getTwitchEncodings(streamInfo, playerType, realFetch);
+        var encodingsM3u8 = await getTwitchEncodings(streamInfo, playerType, realFetch);
         if (!encodingsM3u8) {
             return null;
         }
@@ -521,14 +499,6 @@ async function getTwitchEncodings(streamInfo, playerType, realFetch) {
     urlInfo.searchParams.set('sig', token.signature);
     urlInfo.searchParams.set('token', token.value);
     var response = await realFetch(urlInfo.href);
-    return response.status === 200 ? await response.text() : null;
-}
-
-async function getProxyEncodings(streamInfo, realFetch) {
-    // Asks the user's proxy for the stream. The proxy requests it from a region where Twitch serves no ads and returns
-    // the master playlist; only these few kilobytes travel through it, the video itself still comes straight from
-    // Twitch. The proxy must allow cross-origin reads, since this runs as the page.
-    var response = await realFetch(ProxyUrl.replace('{channel}', encodeURIComponent(streamInfo.ChannelName)));
     return response.status === 200 ? await response.text() : null;
 }
 
