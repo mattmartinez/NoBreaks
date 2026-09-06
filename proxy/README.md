@@ -4,6 +4,29 @@ Twitch decides whether to put ads in a stream partly from where the request come
 
 Only playlists go through here, a few kilobytes every couple of seconds. The video is fetched by the browser straight from Twitch's CDN, so this needs almost no bandwidth or CPU and adds no buffering.
 
+## What a playlist is
+
+Worth understanding, because it is the whole reason this costs so little to run and why ads are hard to remove in the first place.
+
+Twitch delivers live video over HLS. The stream is not one long file. It is chopped into **segments**, each about two seconds of video, published one after another as the broadcast is encoded. A **playlist** is a small plain-text file, ending in `.m3u8`, that lists them. There are two kinds:
+
+- The **master playlist** lists the quality options for a channel (1080p60, 720p, 480p, audio only) and gives a URL for each. The player reads it once when playback starts. This is what the proxy fetches and returns.
+- A **media playlist**, one per quality, lists the URLs of the most recent segments, a rolling window of roughly the last minute. The player re-downloads it every couple of seconds to find out what is new.
+
+So playback is a loop: read the media playlist, fetch the segments it names, play them, read it again. The playlists are text and measure in kilobytes. The segments are the actual video and measure in megabytes per minute.
+
+**Ads live inside the media playlist.** When Twitch runs an ad break it splices the ad's segments into that list alongside the stream's own, and marks the region with a tag:
+
+```
+#EXT-X-DATERANGE:ID="stitched-ad-...",CLASS="twitch-stitched-ad",DURATION=30.000
+```
+
+The player cannot tell an ad segment from a stream segment. Both are ordinary video files served from the same CDN, and it simply plays whatever the list says, in order. This is called server-side ad insertion, and it is why blocking requests by hostname does not work: there is no separate ad server to block. The ad arrives inside the stream itself.
+
+That is what NoBreaks looks for. It reads each media playlist as it goes past, checks for the `twitch-stitched-ad` marker, and when it finds one it substitutes a playlist for the same channel that does not have it.
+
+And it is what "only the playlist is proxied" means. This server fetches those few kilobytes of text on your behalf, from a country where Twitch splices nothing in, and hands them back. Your browser still downloads every video segment directly from Twitch, exactly as it normally would. The proxy never sees or carries the video. That is why a bandwidth allowance meant for a website is far more than this will ever use, and why routing through another continent costs you no buffering: only the index takes the long way around, never the pictures.
+
 ## Running it
 
 Node 18 or newer, no dependencies:
