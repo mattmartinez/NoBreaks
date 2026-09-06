@@ -30,6 +30,7 @@ window.addEventListener('message', function(event) {
 var adBlockDiv = null;
 var adBlockStartTime = null;
 var NativeWorker = window.Worker;
+var playerWorkers = [];
 
 window.Worker = class Worker extends NativeWorker {
     constructor(scriptUrl, options) {
@@ -57,6 +58,7 @@ window.Worker = class Worker extends NativeWorker {
             ${debugLog.toString()}
             ${summarisePlaylist.toString()}
             ${setBanner.toString()}
+            ${giveUpOnThisBreak.toString()}
             ${getStickyM3U8.toString()}
             ${getAdFreeM3U8.toString()}
             ${getTwitchEncodings.toString()}
@@ -68,10 +70,18 @@ window.Worker = class Worker extends NativeWorker {
             declareOptions(self);
             DeviceID = ${JSON.stringify(getDeviceId())};
             DebugEnabled = ${JSON.stringify(getDebugEnabled())};
+            self.addEventListener('message', function(e) {
+                // Sent by the page when a swap has left the player unable to play. Twitch's own worker code below
+                // ignores anything it does not recognise.
+                if (e.data && e.data.key === 'NoBreaksGiveUp') {
+                    giveUpOnThisBreak();
+                }
+            });
             hookWorkerFetch();
             ${originalScript}
         `;
         super(URL.createObjectURL(new Blob([workerScript], { type: 'text/javascript' })), options);
+        playerWorkers.push(this);
         this.addEventListener('message', onWorkerMessage);
         // A new player worker is a new playback session; whatever ad the previous one was blocking is over for us.
         hideBanner();
@@ -308,6 +318,72 @@ function findMediaPlayer() {
     }
     return null;
 }
+
+var brokenChecks = 0;
+var lastBailout = 0;
+
+function watchForBrokenPlayback() {
+    // Only meaningful while we are serving a swapped stream, which is exactly when the banner is up.
+    setInterval(function() {
+        var banner = adBlockDiv && adBlockDiv.style.display !== 'none';
+        if (!banner) {
+            brokenChecks = 0;
+            return;
+        }
+        var video = document.querySelector('.video-player video');
+        if (!video) {
+            return;
+        }
+        // Either the player said outright that it failed, or it has been sitting with nothing to play.
+        var broken = !!video.error || (video.readyState === 0 && video.paused);
+        brokenChecks = broken ? brokenChecks + 1 : 0;
+        if (brokenChecks < 4 || Date.now() - lastBailout < 30000) {
+            return;
+        }
+        brokenChecks = 0;
+        lastBailout = Date.now();
+        console.log('NoBreaks: the swapped stream will not play, going back to the normal one');
+        for (var i = 0; i < playerWorkers.length; i++) {
+            try {
+                playerWorkers[i].postMessage({ key: 'NoBreaksGiveUp' });
+            } catch (err) {}
+        }
+        hideBanner();
+        reloadPlayer();
+    }, 1000);
+}
+
+function reloadPlayer() {
+    // A full reload rather than a pause/resume: the player has to throw away what it could not decode and start again.
+    var root = document.querySelector('#root');
+    var rootKey = root && Object.keys(root).find(function(k) { return k.indexOf('__reactContainer') === 0; });
+    if (!rootKey) {
+        return;
+    }
+    var stack = [root[rootKey]];
+    var visited = 0;
+    while (stack.length && visited++ < 200000) {
+        var node = stack.pop();
+        if (!node) {
+            continue;
+        }
+        var instance = node.stateNode;
+        if (instance && instance.setSrc && instance.setInitialPlaybackSettings) {
+            try {
+                instance.setSrc({ isNewMediaPlayerInstance: true, refreshAccessToken: true });
+            } catch (err) {}
+            return;
+        }
+        if (node.child) {
+            stack.push(node.child);
+        }
+        if (node.sibling) {
+            stack.push(node.sibling);
+        }
+    }
+}
+
+watchForBrokenPlayback();
 
 function getAdBlockDiv() {
     if (adBlockDiv && adBlockDiv.isConnected) {
@@ -583,6 +659,18 @@ async function processM3U8(url, textStr, realFetch) {
         BreakEnforced = true;
     }
     return textStr;
+}
+
+function giveUpOnThisBreak() {
+    // Put every stream back on its own playlist and stop trying for the rest of this break.
+    BreakEnforced = true;
+    for (var channel in StreamInfos) {
+        StreamInfos[channel].Sticky = null;
+        StreamInfos[channel].CleanPolls = 0;
+    }
+    setBanner(false);
+    debugLog('gave-up', { reason: 'the player could not play the swapped stream' });
+    console.log('NoBreaks: the player could not play the swapped stream, leaving this break alone');
 }
 
 function setBanner(show) {
