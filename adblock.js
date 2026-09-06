@@ -55,6 +55,8 @@ window.Worker = class Worker extends NativeWorker {
             ${hookWorkerFetch.toString()}
             ${rememberStream.toString()}
             ${processM3U8.toString()}
+            ${setBanner.toString()}
+            ${getStickyM3U8.toString()}
             ${getAdFreeM3U8.toString()}
             ${getTwitchEncodings.toString()}
             ${getProxyEncodings.toString()}
@@ -343,6 +345,8 @@ function rememberStream(url, encodingsM3u8) {
     streamInfo.UsherParams = new URL(url).search;
     streamInfo.Variants = {}; // media playlist url (without query) -> { Resolution, FrameRate, Video }
     streamInfo.FallbackCache = {}; // player type -> cached master playlist of that player type
+    streamInfo.Sticky = null; // player type whose session the player is on for the current break, if it was moved
+    streamInfo.CleanPolls = 0; // consecutive polls in which the normal stream was clean while the player was moved
     var lines = encodingsM3u8.split(/\r?\n/);
     for (var i = 0; i < lines.length - 1; i++) {
         if (!lines[i].startsWith('#EXT-X-STREAM-INF')) {
@@ -365,23 +369,50 @@ function rememberStream(url, encodingsM3u8) {
 async function processM3U8(url, textStr, realFetch) {
     // Returns the playlist the player should get for the media playlist it asked for: an ad-free one from another
     // session while the normal stream carries ads, otherwise its own.
+    //
+    // The player is moved at most twice per break: once onto an alternate session and once back. Once moved it stays
+    // there even if that session starts carrying ads too, and it only comes back after the normal stream has been
+    // clean for two polls in a row, because the ad marker flickers at pod boundaries. Every move is a timeline jump;
+    // two moves in quick succession were seen to starve the player until it paused itself, and the single move back
+    // is what the resync recovers.
     var key = withoutQuery(url);
     var streamInfo = StreamInfosByUrl[key];
     if (!textStr || !streamInfo) {
         return textStr;
     }
-    if (!textStr.includes(AdSignifier)) {
-        if (WasShowingAd) {
-            console.log('NoBreaks: ads finished');
-            WasShowingAd = false;
-            postMessage({ key: 'HideAdBlockBanner' });
-            postMessage({ key: 'ResyncPlayer' });
+    var variant = streamInfo.Variants[key];
+    var siteHasAd = textStr.includes(AdSignifier);
+
+    if (streamInfo.Sticky) {
+        streamInfo.CleanPolls = siteHasAd ? 0 : streamInfo.CleanPolls + 1;
+        if (streamInfo.CleanPolls < 2) {
+            var stickyText = null;
+            try {
+                stickyText = await getStickyM3U8(streamInfo, variant, realFetch);
+            } catch (err) {}
+            if (stickyText) {
+                setBanner(!stickyText.includes(AdSignifier));
+                return stickyText;
+            }
+            // That session is gone. Leave the rest of this break alone rather than move the player a third time.
+            BreakEnforced = true;
         }
+        console.log('NoBreaks: back to the normal stream');
+        streamInfo.Sticky = null;
+        streamInfo.CleanPolls = 0;
+        setBanner(false);
+        postMessage({ key: 'ResyncPlayer' });
+        if (!siteHasAd) {
+            BreakEnforced = false;
+        }
+        return textStr;
+    }
+
+    if (!siteHasAd) {
         BreakEnforced = false;
         return textStr;
     }
     if (!BreakEnforced) {
-        var variant = streamInfo.Variants[key];
         for (var i = 0; i < FallbackPlayerTypes.length; i++) {
             var playerType = FallbackPlayerTypes[i];
             var adFreeText = null;
@@ -391,22 +422,47 @@ async function processM3U8(url, textStr, realFetch) {
                 console.log('NoBreaks: failed to get an ad-free stream as ' + playerType, err);
             }
             if (adFreeText && !adFreeText.includes(AdSignifier)) {
-                WasShowingAd = true;
-                postMessage({ key: 'ShowAdBlockBanner' });
+                streamInfo.Sticky = playerType;
+                streamInfo.CleanPolls = 0;
+                setBanner(true);
                 return adFreeText;
             }
         }
         // Every fallback carries ads as well: Twitch enforces ads on this channel. A fresh session sometimes looks
         // clean for a few seconds before it is marked too; chasing that is not worth the churn, so leave the rest of
-        // this break alone.
+        // this break alone. The player was never moved, so there is nothing to recover.
+        console.log('NoBreaks: no ad-free stream available, leaving this break alone');
         BreakEnforced = true;
     }
-    if (WasShowingAd) {
-        console.log('NoBreaks: no ad-free stream available, leaving this break alone');
+    return textStr;
+}
+
+function setBanner(show) {
+    if (show && !WasShowingAd) {
+        WasShowingAd = true;
+        postMessage({ key: 'ShowAdBlockBanner' });
+    } else if (!show && WasShowingAd) {
         WasShowingAd = false;
         postMessage({ key: 'HideAdBlockBanner' });
     }
-    return textStr;
+}
+
+async function getStickyM3U8(streamInfo, variant, realFetch) {
+    // The media playlist of the session the player is already on, from that session's cached master playlist. Never
+    // asks for a new session: that would be another move.
+    var cache = streamInfo.FallbackCache[streamInfo.Sticky];
+    if (!cache || !cache.Value) {
+        return null;
+    }
+    var streamM3u8Url = getStreamUrlForVariant(cache.Value, variant);
+    if (!streamM3u8Url) {
+        return null;
+    }
+    var response = await realFetch(streamM3u8Url);
+    if (response.status !== 200) {
+        return null;
+    }
+    return (await response.text()) || null;
 }
 
 async function getAdFreeM3U8(streamInfo, variant, playerType, realFetch) {
