@@ -6,11 +6,15 @@ It works on channels where such a copy exists, and stays out of the way on chann
 
 ## What it does
 
-While an ad plays, the playlist Twitch's player is reading lists ad segments instead of the stream. NoBreaks notices that, asks Twitch for the same channel as a different *player type* (`embed`, then `thunderdome`), and if that copy has no ads it hands the player that one instead. When the break is over it puts the player back. A small "Skipping ad break..." notice shows while this is happening, and the popup counts the time saved.
+While an ad plays, the playlist Twitch's player is reading lists ad segments instead of the stream. NoBreaks notices that, asks Twitch for the same channel as a different *player type*, and if that copy has no ads it hands the player that one instead. When the break is over it puts the player back. A small "Skipping ad break..." notice shows while this is happening, and the popup counts the time saved.
+
+It tries `embed` first, which offers the full range of qualities, then `thunderdome`, which stops at 480p, then `autoplay` asked for as an **android** device. That last one matters: on channels where Twitch marks every web player type with the same ad, the android autoplay stream is the one still served without it. It only goes up to 360p, so it is used only when it can match the quality you are already on.
 
 ## What it cannot do
 
-**Enforced breaks.** On many channels Twitch now marks every player type with the same ad. There is no clean copy to swap in, so NoBreaks leaves the stream alone and you see the ad, or Twitch's purple "Commercial break in progress" card, for the length of the break. This is not a bug and there is no setting that changes it.
+**Enforced breaks at your quality.** On many channels Twitch marks every *web* player type with the same ad. The android autoplay stream usually still comes back clean, but it only offers up to 360p, and handing 360p segments to a player expecting 1080p makes it refuse to play at all. So when nothing can match the quality you are on, the break is left alone and you see the ad, or Twitch's purple "Commercial break in progress" card, for its duration. A higher-quality viewer therefore gets less benefit than a lower-quality one on those channels.
+
+**Swaps that the player will not accept.** Substituting a stream from another session can occasionally leave the player unable to decode it. When that happens NoBreaks gives up on the break and puts the player back on the real stream, so the worst case is seeing the ad rather than a broken player.
 
 **Client-side ads.** Some breaks are played by the player itself rather than baked into the stream. NoBreaks only rewrites playlists, so it cannot touch those. It deliberately does not interfere while one is on screen, because doing so used to freeze the player permanently.
 
@@ -76,12 +80,26 @@ The picture often drops in quality during and after a skip. The alternate copies
 - `adblock.js` runs inside the page, wraps the player worker and swaps playlists.
 - `bridge.js` is a regular content script relaying settings between `chrome.storage` and the page.
 - `popup/` is the toolbar popup: the notice toggle and the counter.
+- `background.js` reloads the extension on request while developing; see below.
 - `tools/check-region.js` reports whether Twitch stitches ads into a channel from wherever you run it. Node 18 or newer, no dependencies.
+
+## Looking at what it is doing
+
+Set `localStorage.nobreaks_debug = '1'` on a Twitch tab and reload. The worker then reports every decision it makes:
+
+```js
+window.NoBreaksDebug.summary()      // counts by event, frozen and paused seconds
+window.NoBreaksDebug.tail(40)       // recent decisions: which player types were tried, and what came back
+window.NoBreaksDebug.playerTail(30) // player state per second, to line up against them
+```
+
+With that flag on, `window.postMessage({ type: 'NoBreaksReload' }, location.origin)` reloads the extension, which saves clicking reload on `chrome://extensions` for every edit. Refresh the tab afterwards, since reloading the extension does not re-inject content scripts into tabs that are already open.
 
 ## Version history
 
 - **1.1.2** Keep the break state when the player re-reads the master playlist, so the notice cannot be left showing after the break ends.
 - **1.1.1** Move the player at most twice per break. Fixes the stream freezing when the ad marker flickers between pods.
+- **1.3.0** Ask as the android autoplay player, the one copy still served without the ad when every web player type is marked, used only when it matches your current quality. If a swapped stream will not play, give up on that break and restore the real stream rather than leave the player broken.
 - **1.2.0** Removed the playlist proxy setting. It was measured not to help from any region tested.
 - **1.1.0** Optional playlist proxy for enforced breaks (removed in 1.2.0).
 - **1.0.2** Never nudge the player while Twitch is showing its own ad, which used to lock the stream up for good.

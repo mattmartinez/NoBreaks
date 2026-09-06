@@ -16,13 +16,18 @@ function pushSettings() {
 }
 
 // Development convenience: let a Twitch tab ask the extension to reload itself, so an edit can be picked up without
-// clicking reload on chrome://extensions. See background.js.
+// clicking reload on chrome://extensions. See background.js. Only listened for when introspection has been turned on
+// deliberately, so a shipped extension does not let any script on twitch.tv restart it.
 window.addEventListener('message', function(event) {
-    if (event.source === window && event.data && event.data.type === 'NoBreaksReload') {
-        try {
-            chrome.runtime.sendMessage('nobreaks-reload');
-        } catch (err) {}
+    if (event.source !== window || !event.data || event.data.type !== 'NoBreaksReload') {
+        return;
     }
+    try {
+        if (localStorage.getItem('nobreaks_debug') !== '1') {
+            return;
+        }
+        chrome.runtime.sendMessage('nobreaks-reload');
+    } catch (err) {}
 });
 
 // adblock.js reports the running total of blocked seconds whenever an ad ends.
