@@ -59,6 +59,7 @@ window.Worker = class Worker extends NativeWorker {
             ${summarisePlaylist.toString()}
             ${setBanner.toString()}
             ${giveUpOnThisBreak.toString()}
+            ${bestHeightIn.toString()}
             ${getStickyM3U8.toString()}
             ${getAdFreeM3U8.toString()}
             ${getTwitchEncodings.toString()}
@@ -81,6 +82,7 @@ window.Worker = class Worker extends NativeWorker {
             ${originalScript}
         `;
         super(URL.createObjectURL(new Blob([workerScript], { type: 'text/javascript' })), options);
+        NoBreaksDebug.workerSource = workerScript;
         playerWorkers.push(this);
         this.addEventListener('message', onWorkerMessage);
         // A new player worker is a new playback session; whatever ad the previous one was blocking is over for us.
@@ -127,6 +129,32 @@ var NoBreaksDebug = window.NoBreaksDebug = {
     decisions: [],   // one per worker decision
     player: [],      // one per second of player state
     limit: 4000,
+    // What this loaded copy can actually do. Reading a version string has twice led to a session spent debugging a
+    // build that was never loaded, so ask the code itself.
+    build: function() {
+        var worker = this.workerSource || '';
+        return {
+            androidFallback: worker.indexOf("'autoplay'") !== -1 && worker.indexOf('android') !== -1,
+            qualityShift: typeof lowerQualityTo === 'function' && worker.indexOf('LowerQuality') !== -1,
+            bailout: typeof watchForBrokenPlayback === 'function'
+        };
+    },
+    workerSource: null,   // the exact code the player's worker is running, set when it is created
+    // What the player is showing and what it could show, which is what decides whether a smaller ad-free copy is usable.
+    quality: function() {
+        var player = findMediaPlayer();
+        if (!player || typeof player.getQualities !== 'function') {
+            return 'no player';
+        }
+        var current = typeof player.getQuality === 'function' ? player.getQuality() : null;
+        return {
+            current: current ? current.group + ' ' + current.width + 'x' + current.height : null,
+            auto: typeof player.isAutoQualityMode === 'function' ? player.isAutoQualityMode() : null,
+            available: (player.getQualities() || []).map(function(q) { return q.group + ' ' + q.width + 'x' + q.height; }),
+            beforeBreak: qualityBeforeBreak,
+            canSet: !!findQualityController()
+        };
+    },
     clear: function() { this.decisions.length = 0; this.player.length = 0; return 'cleared'; },
     // Compact view: the decisions, newest last, as readable lines.
     tail: function(n) {
@@ -142,7 +170,7 @@ var NoBreaksDebug = window.NoBreaksDebug = {
     // Player state around a moment, to line up with a decision.
     playerTail: function(n) {
         return this.player.slice(-(n || 30)).map(function(p) {
-            return p.at + ' t=' + p.t + (p.paused ? ' PAUSED' : '') + ' rs' + p.rs + ' buf' + p.buf +
+            return p.at + ' t=' + p.t + (p.paused ? ' PAUSED' : '') + ' rs' + p.rs + ' buf' + p.buf + ' ' + p.size + (p.videos > 1 ? ' videos=' + p.videos : '') +
                 (p.banner ? ' BANNER' : '') + (p.ad ? ' ADUI' : '') + (p.purple ? ' PURPLE' : '');
         });
     },
@@ -172,7 +200,7 @@ function startPlayerSampler() {
     }
     var lastTime = null;
     NoBreaksDebug.sampler = setInterval(function() {
-        var video = document.querySelector('.video-player video');
+        var video = findStreamVideo();
         var banner = document.querySelector('.nobreaks-overlay');
         var time = video ? Math.round(video.currentTime * 10) / 10 : null;
         var sample = {
@@ -180,6 +208,8 @@ function startPlayerSampler() {
             t: time,
             paused: video ? video.paused : null,
             rs: video ? video.readyState : null,
+            size: video ? video.videoWidth + 'x' + video.videoHeight : null,
+            videos: document.querySelectorAll('video').length,
             net: video ? video.networkState : null,
             buf: (video && video.buffered.length) ? Math.round((video.buffered.end(video.buffered.length - 1) - video.currentTime) * 10) / 10 : null,
             banner: !!(banner && banner.style.display !== 'none'),
@@ -213,6 +243,10 @@ function onWorkerMessage(e) {
         hideBanner();
     } else if (key === 'ResyncPlayer') {
         resyncPlayer();
+    } else if (key === 'LowerQuality') {
+        lowerQualityTo(e.data.height);
+    } else if (key === 'RestoreQuality') {
+        restoreQuality();
     }
 }
 
@@ -319,8 +353,114 @@ function findMediaPlayer() {
     return null;
 }
 
+function findQualityController() {
+    // Quality is read and written through two different objects, which is not obvious and was measured on a live
+    // stream. The media player instance reports the quality list and the current one, but its setQuality is accepted
+    // and does nothing: the picture stayed 1920x1080. The React component that owns the quality menu has only a
+    // setQuality, and that one does move the picture, to 640x360. So: read from the player, write through this.
+    var root = document.querySelector('#root');
+    if (!root) {
+        return null;
+    }
+    var rootKey = Object.keys(root).find(function(k) { return k.startsWith('__reactContainer$'); });
+    var stack = rootKey && root[rootKey] ? [root[rootKey]] : [];
+    var visited = 0;
+    while (stack.length && visited++ < 200000) {
+        var node = stack.pop();
+        var instance = node.stateNode;
+        if (instance && typeof instance.setQuality === 'function') {
+            return instance;
+        }
+        if (node.child) {
+            stack.push(node.child);
+        }
+        if (node.sibling) {
+            stack.push(node.sibling);
+        }
+    }
+    return null;
+}
+
+function findStreamVideo() {
+    // During an ad break Twitch has a second <video> on the page, and at the end of one break the first match for
+    // '.video-player video' was that other element, sitting paused and empty, which read as a broken player. The
+    // player instance knows which element is the stream, so ask it, and only fall back to the selector.
+    var player = findMediaPlayer();
+    if (player && typeof player.getHTMLVideoElement === 'function') {
+        try {
+            var el = player.getHTMLVideoElement();
+            if (el) {
+                return el;
+            }
+        } catch (err) {}
+    }
+    return document.querySelector('.video-player video');
+}
+
+var qualityBeforeBreak = null;
 var brokenChecks = 0;
 var lastBailout = 0;
+
+function lowerQualityTo(height) {
+    // The ad-free copy of the stream only comes in smaller sizes, so move the player down to one of them for the
+    // break. What the viewer had is remembered once, and put back when the break ends.
+    var player = findMediaPlayer();
+    var controller = findQualityController();
+    if (!player || !controller || typeof player.getQualities !== 'function') {
+        return;
+    }
+    try {
+        var options = player.getQualities() || [];
+        var wanted = null;
+        for (var i = 0; i < options.length; i++) {
+            if (options[i].height <= height && (!wanted || options[i].height > wanted.height)) {
+                wanted = options[i];
+            }
+        }
+        if (!wanted) {
+            // Nothing small enough to be worth the move.
+            return;
+        }
+        var current = typeof player.getQuality === 'function' ? player.getQuality() : null;
+        if (current && current.group === wanted.group) {
+            return;
+        }
+        if (qualityBeforeBreak === null) {
+            qualityBeforeBreak = {
+                group: current ? current.group : null,
+                auto: typeof player.isAutoQualityMode === 'function' ? player.isAutoQualityMode() : false
+            };
+        }
+        // Choosing a quality turns auto off by itself, so there is nothing to switch off first.
+        controller.setQuality(wanted.group);
+        if (NoBreaksDebug.enabled) {
+            recordDecision({ n: 0, t: Date.now(), event: 'quality-dropped', from: qualityBeforeBreak.group, to: wanted.group });
+        }
+        console.log('NoBreaks: dropped to ' + wanted.group + ' so the ad-free copy can be used');
+    } catch (err) {}
+}
+
+function restoreQuality() {
+    var wanted = qualityBeforeBreak;
+    qualityBeforeBreak = null;
+    if (wanted === null) {
+        return;
+    }
+    var player = findMediaPlayer();
+    var controller = findQualityController();
+    try {
+        if (wanted.auto && player && typeof player.setAutoQualityMode === 'function') {
+            // Turning auto back on lets the player climb back to what it can carry, which is where it started.
+            player.setAutoQualityMode(true);
+        } else if (wanted.group && controller) {
+            controller.setQuality(wanted.group);
+        }
+        if (NoBreaksDebug.enabled) {
+            recordDecision({ n: 0, t: Date.now(), event: 'quality-restored', to: wanted.auto ? 'auto' : wanted.group });
+        }
+        console.log('NoBreaks: quality restored');
+    } catch (err) {}
+}
 
 function watchForBrokenPlayback() {
     // Only meaningful while we are serving a swapped stream, which is exactly when the banner is up.
@@ -330,7 +470,7 @@ function watchForBrokenPlayback() {
             brokenChecks = 0;
             return;
         }
-        var video = document.querySelector('.video-player video');
+        var video = findStreamVideo();
         if (!video) {
             return;
         }
@@ -383,7 +523,67 @@ function reloadPlayer() {
     }
 }
 
+var stuckChecks = 0;
+var nudgeReloads = 0;
+
+function watchDroppedQuality() {
+    // The rendition switch that follows a quality drop can land the player on a new timeline while it is in ad mode:
+    // it sits paused at 0 with data buffered and never starts, and the ad overlay it is waiting on never moves
+    // because it never advances. Measured once at 52 seconds of frozen frame, ended only by the hand-back. The
+    // ordinary resync is deferred while the overlay shows, for a good reason, so this nudges the player directly,
+    // gently first: ask it to play, then seek to where the data is, then start it over.
+    setInterval(function() {
+        if (qualityBeforeBreak === null) {
+            stuckChecks = 0;
+            nudgeReloads = 0;
+            return;
+        }
+        var video = findStreamVideo();
+        if (!video) {
+            return;
+        }
+        // Paused with data buffered but not even the current frame decodable: it is not going to start on its own.
+        // Position is not part of it, because the seek below moves the position and the player may still not start.
+        var buffered = video.buffered && video.buffered.length > 0;
+        var stuck = video.paused && video.readyState < 3 && buffered;
+        stuckChecks = stuck ? stuckChecks + 1 : 0;
+        if (stuckChecks === 2) {
+            nudge('play', video);
+            try {
+                var player = findMediaPlayer();
+                if (player && typeof player.play === 'function') {
+                    player.play();
+                }
+            } catch (err) {}
+        } else if (stuckChecks === 4) {
+            nudge('seek', video);
+            try {
+                video.currentTime = video.buffered.start(0) + 0.1;
+                if (typeof video.play === 'function') {
+                    video.play();
+                }
+            } catch (err) {}
+        } else if (stuckChecks === 7 && nudgeReloads < 1) {
+            nudge('reload', video);
+            nudgeReloads++;
+            stuckChecks = 0;
+            reloadPlayer();
+        }
+    }, 1000);
+}
+
+function nudge(step, video) {
+    if (NoBreaksDebug.enabled) {
+        recordDecision({
+            n: 0, t: Date.now(), event: 'nudge', step: step, rs: video.readyState,
+            buffered: video.buffered.length ? Math.round(video.buffered.start(0) * 10) / 10 + '-' + Math.round(video.buffered.end(video.buffered.length - 1) * 10) / 10 : 'none'
+        });
+    }
+    console.log('NoBreaks: the player did not start after the quality change, nudging it (' + step + ')');
+}
+
 watchForBrokenPlayback();
+watchDroppedQuality();
 
 function getAdBlockDiv() {
     if (adBlockDiv && adBlockDiv.isConnected) {
@@ -537,7 +737,6 @@ function rememberStream(url, encodingsM3u8) {
         return;
     }
     var channelName = match[1];
-    debugLog('master', { channel: channelName });
     var streamInfo = StreamInfos[channelName];
     if (!streamInfo) {
         streamInfo = StreamInfos[channelName] = {
@@ -551,7 +750,10 @@ function rememberStream(url, encodingsM3u8) {
     streamInfo.ChannelName = channelName;
     streamInfo.UsherUrl = withoutQuery(url);
     streamInfo.UsherParams = new URL(url).search;
-    streamInfo.Variants = {}; // media playlist url (without query) -> { Resolution, FrameRate, Video }
+    // media playlist url (without query) -> { Resolution, FrameRate, Video }. Entries are added, never removed: the
+    // player keeps polling a playlist from an earlier master read, and a later read may list different renditions.
+    streamInfo.Variants = streamInfo.Variants || {};
+    var added = 0;
     var lines = encodingsM3u8.split(/\r?\n/);
     for (var i = 0; i < lines.length - 1; i++) {
         if (!lines[i].startsWith('#EXT-X-STREAM-INF')) {
@@ -562,6 +764,9 @@ function rememberStream(url, encodingsM3u8) {
             continue;
         }
         var attributes = parseAttributes(lines[i]);
+        if (!streamInfo.Variants[withoutQuery(uri)]) {
+            added++;
+        }
         streamInfo.Variants[withoutQuery(uri)] = {
             Resolution: attributes['RESOLUTION'] || null, // absent for audio only
             FrameRate: attributes['FRAME-RATE'],
@@ -569,6 +774,27 @@ function rememberStream(url, encodingsM3u8) {
         };
         StreamInfosByUrl[withoutQuery(uri)] = streamInfo;
     }
+    debugLog('master', {
+        channel: channelName,
+        params: (function() {
+            // The request parameters other than the secrets, as fields, to tell one kind of master read from another.
+            var out = {};
+            new URL(url).searchParams.forEach(function(value, name) {
+                if (name !== 'sig' && name !== 'token') {
+                    out[name] = value;
+                }
+            });
+            return out;
+        })(),
+        added: added,
+        // Any stream entry without a size is kept verbatim: a playlist registered without one cannot be matched to a
+        // fallback by size, and mid-break the player was seen polling exactly such a playlist.
+        oddLines: lines.filter(function(l) { return l.startsWith('#EXT-X-STREAM-INF') && l.indexOf('RESOLUTION=') === -1; }),
+        variants: Object.keys(streamInfo.Variants).map(function(u) {
+            var v = streamInfo.Variants[u];
+            return (v.Resolution || 'audio') + (v.FrameRate ? '@' + v.FrameRate : '') + (v.Video ? ' video=' + v.Video : '') + ' ' + u.slice(u.lastIndexOf('/') + 1, u.lastIndexOf('/') + 9);
+        })
+    });
 }
 
 async function processM3U8(url, textStr, realFetch) {
@@ -589,6 +815,8 @@ async function processM3U8(url, textStr, realFetch) {
     var siteHasAd = textStr.includes(AdSignifier);
     debugLog('poll', {
         variant: variant && variant.Resolution ? variant.Resolution : 'audio',
+        playlist: key.slice(key.lastIndexOf('/') + 1, key.lastIndexOf('/') + 9),
+        video: variant ? variant.Video : null,
         site: summarisePlaylist(textStr),
         sticky: streamInfo.Sticky,
         cleanPolls: streamInfo.CleanPolls,
@@ -613,6 +841,7 @@ async function processM3U8(url, textStr, realFetch) {
             BreakEnforced = true;
         }
         debugLog('hand-back', { from: streamInfo.Sticky, siteHasAd: siteHasAd });
+        postMessage({ key: 'RestoreQuality' });
         console.log('NoBreaks: back to the normal stream');
         streamInfo.Sticky = null;
         streamInfo.CleanPolls = 0;
@@ -628,9 +857,20 @@ async function processM3U8(url, textStr, realFetch) {
         // Nothing to skip and the player is on its own stream, so the banner must be down whatever happened before.
         setBanner(false);
         BreakEnforced = false;
+        if (key === streamInfo.AdKey) {
+            // The playlist that carried the ad is clean again: the break is over. The player polls other playlists
+            // during a break too, and those coming back clean says nothing about it.
+            streamInfo.MismatchPolls = 0;
+            streamInfo.AdKey = null;
+        }
         return textStr;
     }
+    streamInfo.AdKey = key;
     if (!BreakEnforced) {
+        // A fallback that fails on the first poll of a break often works a moment later, and dropping the picture
+        // quality is not free. Only spend it once the better copies have failed a few polls running.
+        streamInfo.MismatchPolls = (streamInfo.MismatchPolls || 0) + 1;
+        var waitingForQuality = false;
         for (var i = 0; i < FallbackPlayerTypes.length; i++) {
             var playerType = FallbackPlayerTypes[i];
             var adFreeText = null;
@@ -647,13 +887,30 @@ async function processM3U8(url, textStr, realFetch) {
             if (adFreeText && !adFreeText.includes(AdSignifier)) {
                 streamInfo.Sticky = playerType;
                 streamInfo.CleanPolls = 0;
+                streamInfo.MismatchPolls = 0;
                 setBanner(true);
                 return adFreeText;
+            }
+            var mismatch = streamInfo.FallbackCache[playerType] ? streamInfo.FallbackCache[playerType].Mismatch : 0;
+            if (adFreeText === null && mismatch > 0) {
+                // This copy is free of the ad but does not come in the quality being watched: the android stream stops
+                // at 360p. So the break is not hopeless and must not be written off. Rather than sit through it, ask
+                // the player to drop to a size the copy does have, and put the quality back when the break ends.
+                waitingForQuality = true;
+                if (streamInfo.MismatchPolls >= 3) {
+                    debugLog('ask-lower-quality', { playerType: playerType, height: mismatch });
+                    postMessage({ key: 'LowerQuality', height: mismatch });
+                }
             }
         }
         // Every fallback carries ads as well: Twitch enforces ads on this channel. A fresh session sometimes looks
         // clean for a few seconds before it is marked too; chasing that is not worth the churn, so leave the rest of
         // this break alone. The player was never moved, so there is nothing to recover.
+        if (waitingForQuality) {
+            // An ad-free copy is there and the player has been asked to move to a size it comes in. Say nothing about
+            // the break yet: the next poll should be for a variant that copy can answer.
+            return textStr;
+        }
         debugLog('enforced', { tried: FallbackPlayerTypes });
         console.log('NoBreaks: no ad-free stream available, leaving this break alone');
         BreakEnforced = true;
@@ -669,6 +926,7 @@ function giveUpOnThisBreak() {
         StreamInfos[channel].CleanPolls = 0;
     }
     setBanner(false);
+    postMessage({ key: 'RestoreQuality' });
     debugLog('gave-up', { reason: 'the player could not play the swapped stream' });
     console.log('NoBreaks: the player could not play the swapped stream, leaving this break alone');
 }
@@ -716,6 +974,10 @@ async function getAdFreeM3U8(streamInfo, variant, playerType, realFetch) {
             cache.Value = null;
         }
     }
+    if (!text && cache.Value && cache.RequestTime >= Date.now() - EncodingCacheTimeout) {
+        // A current master that simply cannot serve this size. Asking for another token would not change that.
+        return null;
+    }
     if (!text) {
         var encodingsM3u8 = await getTwitchEncodings(streamInfo, playerType, realFetch);
         if (!encodingsM3u8) {
@@ -758,9 +1020,19 @@ async function getStreamForVariant(streamInfo, variant, encodingsM3u8, playerTyp
     cache.Value = encodingsM3u8;
     var streamM3u8Url = getStreamUrlForVariant(encodingsM3u8, variant, playerType === 'autoplay');
     if (!streamM3u8Url) {
-        cache.Value = null;
+        // The master is fine, it just does not come in the size being watched. Before asking anyone to change quality,
+        // check the closest size it does have: there is no point moving the player for a copy that carries the ad too.
+        cache.Mismatch = 0;
+        var probeUrl = getStreamUrlForVariant(encodingsM3u8, variant, false);
+        if (probeUrl) {
+            var probe = await realFetch(probeUrl);
+            if (probe.status === 200 && !(await probe.text()).includes(AdSignifier)) {
+                cache.Mismatch = bestHeightIn(encodingsM3u8);
+            }
+        }
         return null;
     }
+    cache.Mismatch = 0;
     var streamM3u8Response = await realFetch(streamM3u8Url);
     if (streamM3u8Response.status !== 200) {
         cache.Value = null;
@@ -768,6 +1040,19 @@ async function getStreamForVariant(streamInfo, variant, encodingsM3u8, playerTyp
     }
     var m3u8Text = await streamM3u8Response.text();
     return m3u8Text || null;
+}
+
+function bestHeightIn(encodingsM3u8) {
+    // Tallest video variant a copy of the stream offers.
+    var lines = encodingsM3u8.split(/\r?\n/);
+    var best = 0;
+    for (var i = 0; i < lines.length; i++) {
+        var match = /RESOLUTION=\d+x(\d+)/.exec(lines[i]);
+        if (match && Number(match[1]) > best) {
+            best = Number(match[1]);
+        }
+    }
+    return best;
 }
 
 function getStreamUrlForVariant(encodingsM3u8, variant, mustMatchResolution) {

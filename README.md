@@ -8,11 +8,11 @@ It works on channels where such a copy exists, and stays out of the way on chann
 
 While an ad plays, the playlist Twitch's player is reading lists ad segments instead of the stream. NoBreaks notices that, asks Twitch for the same channel as a different *player type*, and if that copy has no ads it hands the player that one instead. When the break is over it puts the player back. A small "Skipping ad break..." notice shows while this is happening, and the popup counts the time saved.
 
-It tries `embed` first, which offers the full range of qualities, then `thunderdome`, which stops at 480p, then `autoplay` asked for as an **android** device. That last one matters: on channels where Twitch marks every web player type with the same ad, the android autoplay stream is the one still served without it. It only goes up to 360p, so it is used only when it can match the quality you are already on.
+It tries `embed` first, which offers the full range of qualities, then `thunderdome`, which stops at 480p, then `autoplay` asked for as an **android** device. That last one matters: on channels where Twitch marks every web player type with the same ad, the android autoplay stream is the one still served without it. It only goes up to 360p, and a player expecting 1080p will not accept 360p segments, so when it is the only clean copy NoBreaks first moves the player down to 360p, then swaps, and puts your quality back when the break ends. The player is given a few seconds to find a better copy before the quality is spent.
 
 ## What it cannot do
 
-**Enforced breaks at your quality.** On many channels Twitch marks every *web* player type with the same ad. The android autoplay stream usually still comes back clean, but it only offers up to 360p, and handing 360p segments to a player expecting 1080p makes it refuse to play at all. So when nothing can match the quality you are on, the break is left alone and you see the ad, or Twitch's purple "Commercial break in progress" card, for its duration. A higher-quality viewer therefore gets less benefit than a lower-quality one on those channels.
+**Enforced breaks at full quality.** On many channels Twitch marks every *web* player type with the same ad, and the android autoplay stream is the only clean copy. It only comes in 360p and 160p, so for those breaks you watch the stream at 360p rather than the ad at 1080p. The alternative, handing the player a replacement master playlist so it can stay at its quality, is a larger rework and not built. Measured on 2026-09-06: on yourragegaming and illojuan the `embed` and `thunderdome` copies carried the ad for the first 35 to 40 seconds of every break, so without the drop a viewer at 1080p or 1440p saw most of the ad.
 
 **Swaps that the player will not accept.** Substituting a stream from another session can occasionally leave the player unable to decode it. When that happens NoBreaks gives up on the break and puts the player back on the real stream, so the worst case is seeing the ad rather than a broken player.
 
@@ -66,14 +66,15 @@ Most likely the break is enforced, which is expected rather than broken. To tell
 
 - `hooked the player worker` on page load means the extension is running.
 - `trying to skip ads as embed` means it found a break and is looking for a clean copy.
-- `no ad-free stream available, leaving this break alone` means the break is enforced. Nothing more can be done for that break.
+- `dropped to 360p30 so the ad-free copy can be used` means only the android copy was clean and the player was moved down to it; `quality restored` follows when the break ends.
+- `no ad-free stream available, leaving this break alone` means the break is enforced and not even the android copy was clean. Nothing more can be done for that break.
 - No messages at all during an ad means either the extension is not running on that page, or the ad is client-side and never appeared in the playlist.
 
 To check a channel directly, `tools/check-region.js` reports whether Twitch is stitching ads into a given channel from wherever you run it.
 
 ## What you will see
 
-The picture often drops in quality during and after a skip. The alternate copies do not always offer every resolution (`thunderdome` stops at 480p), and Twitch's own adaptive quality takes a while to climb back. That is the player's doing, not something the extension sets.
+The picture often drops in quality during a skip. Sometimes that is the player's doing: the alternate copies do not always offer every resolution (`thunderdome` stops at 480p), and Twitch's own adaptive quality takes a while to climb back. On enforced breaks it is deliberate: the player is set to 360p for the break because that is all the clean copy offers, and set back to what you had, auto included, when the break ends. About six seconds of the ad usually plays before the drop, because better copies are given a chance first.
 
 ## Files
 
@@ -97,6 +98,7 @@ With that flag on, `window.postMessage({ type: 'NoBreaksReload' }, location.orig
 
 ## Version history
 
+- **1.4.0** Use the android copy at any viewing quality by moving the player to 360p for the break and back afterwards. Also fixes a hidden picture-by-picture player Twitch creates during breaks wiping the variant table, and the watchdog mistaking that player for a broken stream.
 - **1.1.2** Keep the break state when the player re-reads the master playlist, so the notice cannot be left showing after the break ends.
 - **1.1.1** Move the player at most twice per break. Fixes the stream freezing when the ad marker flickers between pods.
 - **1.3.0** Ask as the android autoplay player, the one copy still served without the ad when every web player type is marked, used only when it matches your current quality. If a swapped stream will not play, give up on that break and restore the real stream rather than leave the player broken.
