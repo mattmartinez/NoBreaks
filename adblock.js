@@ -60,6 +60,7 @@ window.Worker = class Worker extends NativeWorker {
             ${setBanner.toString()}
             ${giveUpOnThisBreak.toString()}
             ${bestHeightIn.toString()}
+            ${stickySizeMismatch.toString()}
             ${getStickyM3U8.toString()}
             ${getAdFreeM3U8.toString()}
             ${getTwitchEncodings.toString()}
@@ -422,14 +423,13 @@ function lowerQualityTo(height) {
             return;
         }
         var current = typeof player.getQuality === 'function' ? player.getQuality() : null;
-        if (current && current.group === wanted.group) {
+        var auto = typeof player.isAutoQualityMode === 'function' ? player.isAutoQualityMode() : false;
+        if (current && current.group === wanted.group && !auto) {
+            // Already there and pinned. In auto mode it would ramp away, so that case falls through and pins it.
             return;
         }
         if (qualityBeforeBreak === null) {
-            qualityBeforeBreak = {
-                group: current ? current.group : null,
-                auto: typeof player.isAutoQualityMode === 'function' ? player.isAutoQualityMode() : false
-            };
+            qualityBeforeBreak = { group: current ? current.group : null, auto: auto };
         }
         // Choosing a quality turns auto off by itself, so there is nothing to switch off first.
         controller.setQuality(wanted.group);
@@ -530,8 +530,8 @@ function watchDroppedQuality() {
     // The rendition switch that follows a quality drop can land the player on a new timeline while it is in ad mode:
     // it sits paused at 0 with data buffered and never starts, and the ad overlay it is waiting on never moves
     // because it never advances. Measured once at 52 seconds of frozen frame, ended only by the hand-back. The
-    // ordinary resync is deferred while the overlay shows, for a good reason, so this nudges the player directly,
-    // gently first: ask it to play, then seek to where the data is, then start it over.
+    // ordinary resync is deferred while the overlay shows, for a good reason, so this nudges the player directly:
+    // seek to where the data is, then ask it to play, then start it over.
     setInterval(function() {
         if (qualityBeforeBreak === null) {
             stuckChecks = 0;
@@ -548,19 +548,21 @@ function watchDroppedQuality() {
         var stuck = video.paused && video.readyState < 3 && buffered;
         stuckChecks = stuck ? stuckChecks + 1 : 0;
         if (stuckChecks === 2) {
-            nudge('play', video);
-            try {
-                var player = findMediaPlayer();
-                if (player && typeof player.play === 'function') {
-                    player.play();
-                }
-            } catch (err) {}
-        } else if (stuckChecks === 4) {
+            // Measured twice: the player sits at 0 with its data buffered from 8-10s on; seeking to the data starts it
+            // within a second, and asking it to play does nothing.
             nudge('seek', video);
             try {
                 video.currentTime = video.buffered.start(0) + 0.1;
                 if (typeof video.play === 'function') {
                     video.play();
+                }
+            } catch (err) {}
+        } else if (stuckChecks === 4) {
+            nudge('play', video);
+            try {
+                var player = findMediaPlayer();
+                if (player && typeof player.play === 'function') {
+                    player.play();
                 }
             } catch (err) {}
         } else if (stuckChecks === 7 && nudgeReloads < 1) {
@@ -836,6 +838,16 @@ async function processM3U8(url, textStr, realFetch) {
                 setBanner(!stickyText.includes(AdSignifier));
                 return stickyText;
             }
+            var stickyHeight = stickySizeMismatch(streamInfo, variant);
+            if (stickyHeight > 0) {
+                // The session is fine; the player has moved to a size it does not come in. Keep the session, hand the
+                // real playlist over for this one poll, and ask the player to move to a size the copy has. The next
+                // poll for that size is served from the same session, so nothing is moved and nothing is handed back.
+                debugLog('sticky-size-mismatch', { playerType: streamInfo.Sticky, height: stickyHeight });
+                setBanner(false);
+                postMessage({ key: 'LowerQuality', height: stickyHeight });
+                return textStr;
+            }
             debugLog('sticky-session-gone', { playerType: streamInfo.Sticky });
             // That session is gone. Leave the rest of this break alone rather than move the player a third time.
             BreakEnforced = true;
@@ -867,8 +879,8 @@ async function processM3U8(url, textStr, realFetch) {
     }
     streamInfo.AdKey = key;
     if (!BreakEnforced) {
-        // A fallback that fails on the first poll of a break often works a moment later, and dropping the picture
-        // quality is not free. Only spend it once the better copies have failed a few polls running.
+        // Polls of this break in which only a smaller copy was clean. Measured over eight breaks on two channels: the
+        // better copies never came clean inside the first 30 seconds, so waiting for them only lengthened the ad.
         streamInfo.MismatchPolls = (streamInfo.MismatchPolls || 0) + 1;
         var waitingForQuality = false;
         for (var i = 0; i < FallbackPlayerTypes.length; i++) {
@@ -888,6 +900,14 @@ async function processM3U8(url, textStr, realFetch) {
                 streamInfo.Sticky = playerType;
                 streamInfo.CleanPolls = 0;
                 streamInfo.MismatchPolls = 0;
+                if (playerType === 'autoplay' && streamInfo.FallbackCache.autoplay && streamInfo.FallbackCache.autoplay.Value) {
+                    // Hold the player at a size this copy has for the rest of the break. It loads at a small size and
+                    // ramps up on its own, and the copy has nothing above 360p to ramp to: every measured preroll went
+                    // ad-free, ramped, then showed the ad until the player was moved back down.
+                    var hold = bestHeightIn(streamInfo.FallbackCache.autoplay.Value);
+                    debugLog('hold-quality', { playerType: playerType, height: hold });
+                    postMessage({ key: 'LowerQuality', height: hold });
+                }
                 setBanner(true);
                 return adFreeText;
             }
@@ -897,7 +917,7 @@ async function processM3U8(url, textStr, realFetch) {
                 // at 360p. So the break is not hopeless and must not be written off. Rather than sit through it, ask
                 // the player to drop to a size the copy does have, and put the quality back when the break ends.
                 waitingForQuality = true;
-                if (streamInfo.MismatchPolls >= 3) {
+                if (streamInfo.MismatchPolls >= 1) {
                     debugLog('ask-lower-quality', { playerType: playerType, height: mismatch });
                     postMessage({ key: 'LowerQuality', height: mismatch });
                 }
@@ -1040,6 +1060,19 @@ async function getStreamForVariant(streamInfo, variant, encodingsM3u8, playerTyp
     }
     var m3u8Text = await streamM3u8Response.text();
     return m3u8Text || null;
+}
+
+function stickySizeMismatch(streamInfo, variant) {
+    // Non-zero when the session the player is on is fine but does not come in the size now being polled: the tallest
+    // size it does come in. Zero when it does come in this size, so a failure to fetch it means the session is gone.
+    var cache = streamInfo.FallbackCache[streamInfo.Sticky];
+    if (!cache || !cache.Value || !variant || !variant.Resolution) {
+        return 0;
+    }
+    if (getStreamUrlForVariant(cache.Value, variant, streamInfo.Sticky === 'autoplay')) {
+        return 0;
+    }
+    return bestHeightIn(cache.Value);
 }
 
 function bestHeightIn(encodingsM3u8) {
